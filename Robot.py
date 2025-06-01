@@ -196,7 +196,7 @@ class Robot:
         """
         distance_to_source = np.linalg.norm(self.position - signal_source_pos)
         self.sensed_signal_strength = signal_power / (distance_to_source**2 + EPSILON)
-        return self.sensed_signal_strength
+        return self.sensed_signal_strength + np.random.normal(loc=0, scale=5.0)
 
     def __str__(self):
         """String representation of the Robot's current state."""
