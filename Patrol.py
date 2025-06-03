@@ -82,13 +82,14 @@ class OmniPatrol:
         else:
             self.side = side
 
-        self.angle = angle
 
         self.vertices, self.perimeter = get_vertices_from_shape_name(
             self.shape, self.side
         )
         if self.vertices.size == 0:
             raise ValueError("Invalid shape type")
+        
+        self.angle = angle % (360 / len(self.vertices))
 
         self.patrol = self.create_patrol_polygon()
         self.coverage = self.create_coverage_polygon()
