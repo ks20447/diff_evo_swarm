@@ -6,19 +6,29 @@ import pandas as pd
 from Robot import Robot
 from Patrol import OmniPatrol
 import matplotlib.pyplot as plt
-from shapely.geometry import Polygon
 from matplotlib.colors import Normalize
+from shapely.geometry import Polygon, Point
 from scipy.optimize import differential_evolution
 from matplotlib.collections import LineCollection
 from optimize import generate_bounds, generalized_objective
 from Voronoi import create_voronoi_partitions_on_map, plot_results
+
+
+def random_point_in_polygon(polygon_vertices):
+    poly = Polygon(polygon_vertices)
+    minx, miny, maxx, maxy = poly.bounds
+
+    while True:
+        p = Point(np.random.uniform(minx, maxx), np.random.uniform(miny, maxy))
+        if poly.contains(p):
+            return np.array([p.x, p.y])
+
 
 # --- Configuration ---
 SIMULATION_STEPS = 250
 ORIENTATION_LINE_LENGTH = 0.3
 
 C = 3e8
-SIGNAL_SOURCE_POS = np.array([12.5, 8.1])
 EMITTER_PARAMS = {"efficiency": 1.0, "pt": 30, "gain": 1.0, "wavelength": C / 2.4e9}
 
 # Trail Color Configuration
@@ -29,6 +39,7 @@ SELECTED_CMAP = plt.cm.viridis
 
 SHAPE_CONFIG = {"Triangle": 3, "Square": 0, "Hexagon": 0}
 S_R = 8.0
+STRENGTH_THRESHOLD = 0.0
 DE_WEIGHTS = [2.0, 1.0, 0.5, 1.0, 10.0]
 NUM_ROBOTS = sum(SHAPE_CONFIG.values())
 
@@ -58,6 +69,8 @@ MAP_VERTICES = (
     + SHIFT
 )
 
+SIGNAL_SOURCE_POS = random_point_in_polygon(MAP_VERTICES)
+
 CSV_FILE = "simulation_data.csv"
 
 
@@ -78,7 +91,7 @@ def voronoi_cells(map_polygon):
     clipped_cells, used_sites = create_voronoi_partitions_on_map(
         map_polygon, grid_points_input
     )
-    plot_results(map_polygon, clipped_cells, used_sites)
+    # plot_results(map_polygon, clipped_cells, used_sites)
 
     return clipped_cells, xbound, ybound
 
@@ -447,7 +460,10 @@ def plot_signal_heatmap(
         ax.legend(loc="upper right")
 
 
-def run_simulation(cell_id, plots, waypoints):
+def run_simulation(cell_id, waypoints, plots=False):
+    
+    print("Sim started")
+    
     robots = initialize_robots(waypoints)
     simulation_data = []
     source_info = {"pos": SIGNAL_SOURCE_POS, "params": EMITTER_PARAMS}
@@ -461,7 +477,8 @@ def run_simulation(cell_id, plots, waypoints):
             robot.sense_signal(source_info["pos"], EMITTER_PARAMS)
             robot.move()
 
-        update_plot(robots, step + 1, plots)
+        if plots:
+            update_plot(robots, step + 1, plots)
 
         if all_robots_finished_patrol:
             for robot in robots:
@@ -479,7 +496,7 @@ def run_simulation(cell_id, plots, waypoints):
                         robot.path_history.pop(0)
             break
 
-        time.sleep(0.05)
+        # time.sleep(0.05)
 
     if not all_robots_finished_patrol:
         for robot in robots:
@@ -504,10 +521,13 @@ def run_simulation(cell_id, plots, waypoints):
                 "path_history": list(robot.path_history),
             }
         )
+        
+    print("Sim ended")
 
-    plt.ioff()
-    plt.close(fig)
-    return simulation_data
+    if plots:
+        plt.ioff()
+        plt.close(fig)
+    return simulation_data, step
 
 
 def plot_orthogonal_line(
@@ -533,11 +553,44 @@ def plot_orthogonal_line(
             p2 = (x0 + dx * length / 2, y0 + dy * length / 2)
 
     ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color=color, lw=lw)
+    
+    
+def intersection_point(orthogonal_lines):
+    A_vals = []
+    b_vals = []
+
+    for x0, y0, m in orthogonal_lines:
+        if np.isinf(m):  # vertical line: x = x0 → 1·x + 0·y = x0
+            A_vals.append([1.0, 0.0])
+            b_vals.append(x0)
+        elif np.isclose(m, 0.0):  # horizontal line: y = y0 → 0·x + 1·y = y0
+            A_vals.append([0.0, 1.0])
+            b_vals.append(y0)
+        else:
+            # General case: y - y0 = m(x - x0) → m x - y = m x0 - y0
+            A = m
+            B = -1.0
+            C = m * x0 - y0
+            A_vals.append([A, B])
+            b_vals.append(C)
+
+    A = np.array(A_vals)
+    b = np.array(b_vals)
+
+    # Solve least squares: minimize ||Ax - b||
+    intersection, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    
+    return intersection
+
+
+def point_error(p1, p2):
+    return np.linalg.norm(np.array(p1) - np.array(p2))
 
 
 if __name__ == "__main__":
     cell_data = []
     patrol_data = {}
+    total_steps = 0
 
     map_polygon = Polygon(MAP_VERTICES)
     cells, xbound, ybound = voronoi_cells(map_polygon)
@@ -556,27 +609,30 @@ if __name__ == "__main__":
 
         patrol_data[f"cell_{i}"] = robot_waypoints
 
-        plt.ion()
-        fig, ax = plt.subplots(figsize=(12, 8))
-        initialize_plot(ax, cell)
-        plots = add_robots_to_plot(ax)
+        # plt.ion()
+        # fig, ax = plt.subplots(figsize=(12, 8))
+        # initialize_plot(ax, cell)
+        # plots = add_robots_to_plot(ax)
+        plots = False
 
-        robot_data = run_simulation(i, plots, robot_waypoints)
+        robot_data, steps = run_simulation(i, robot_waypoints, plots=plots)
         cell_data.append(robot_data)  # <-- Append inside the loop
+        
+        total_steps += steps
 
     # Combine all simulation data from all cells for a single heatmap
     all_simulation_data = [entry for cell in cell_data for entry in cell]
 
-    fig, ax = plt.subplots()
-    plot_signal_heatmap(
-        ax,
-        all_simulation_data,
-        map_vertices=MAP_VERTICES,
-        signal_source_pos=SIGNAL_SOURCE_POS,
-        min_signal=MIN_SIGNAL_FOR_COLORMAP,
-        max_signal=MAX_SIGNAL_FOR_COLORMAP,
-    )
-    plt.show()
+    # fig, ax = plt.subplots()
+    # plot_signal_heatmap(
+    #     ax,
+    #     all_simulation_data,
+    #     map_vertices=MAP_VERTICES,
+    #     signal_source_pos=SIGNAL_SOURCE_POS,
+    #     min_signal=MIN_SIGNAL_FOR_COLORMAP,
+    #     max_signal=MAX_SIGNAL_FOR_COLORMAP,
+    # )
+    # plt.show()
 
     with open("patrol_data.csv", "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
@@ -597,6 +653,19 @@ if __name__ == "__main__":
             robot_id = entry["robot_id"]
             for pos, strength in entry["path_history"]:
                 writer.writerow([cell_id, robot_id, pos[0], pos[1], strength])
+                
+    df = pd.read_csv("patrol_data.csv")
+
+    # Group by cell and robot, and extract waypoints
+    patrol_data = {}
+
+    for (cell_id, robot_id), group in df.groupby(["cell_id", "robot_id"]):
+        waypoints = group[["x", "y"]].to_numpy()
+        
+        if cell_id not in patrol_data:
+            patrol_data[cell_id] = []
+
+        patrol_data[cell_id].append(waypoints)
 
     df = pd.read_csv("simulation_data.csv")
 
@@ -605,17 +674,18 @@ if __name__ == "__main__":
         for robot_id, group in df.groupby("robot_id")
     }
 
-    fig, ax = plt.subplots()
-    ax.plot(MAP_VERTICES[:, 0], MAP_VERTICES[:, 1])
+    # fig, ax = plt.subplots()
+    # ax.plot(MAP_VERTICES[:, 0], MAP_VERTICES[:, 1])
+    
+    orthogonal_lines = []  # Add this at the top of your plotting code
 
     for cell_id, cell_group in df.groupby("cell_id"):
+        
         for robot_id, robot in cell_group.groupby("robot_id"):
+            
+            # ax.scatter(robot["x"], robot["y"], c=robot["strength"], cmap="viridis")
 
-            ax.scatter(robot["x"], robot["y"], c=robot["strength"], cmap="viridis")
-
-            vertices = patrol_data[f"cell_{cell_id}"][
-                robot_id
-            ]  # Assumes robot_vertices is indexed by robot_id
+            vertices = patrol_data[cell_id][robot_id]
 
             for i in range(len(vertices) - 1):  # closed loop assumed
                 start_x, start_y = vertices[i]
@@ -630,7 +700,7 @@ if __name__ == "__main__":
                 ]
 
                 if not start_match.empty and not end_match.empty:
-
+                    
                     if i == 0:
                         start_idx = start_match.index[0]
                     else:
@@ -644,22 +714,18 @@ if __name__ == "__main__":
 
                     # Skip if max point is at vertex
                     if not (
-                        (
-                            np.isclose(max_strength_row["x"], start_x, atol=1e-3)
-                            and np.isclose(max_strength_row["y"], start_y, atol=1e-3)
-                        )
-                        or (
-                            np.isclose(max_strength_row["x"], end_x)
-                            and np.isclose(max_strength_row["y"], end_y)
-                        )
-                    ):
-                        ax.scatter(
-                            max_strength_row["x"],
-                            max_strength_row["y"],
-                            marker="x",
-                            color="r",
-                            s=10,
-                        )
+                        (np.isclose(max_strength_row["x"], start_x) and np.isclose(max_strength_row["y"], start_y))
+                        or
+                        (np.isclose(max_strength_row["x"], end_x) and np.isclose(max_strength_row["y"], end_y))
+                    ) and max_strength_row["strength"] >= 2:
+                        
+                        # ax.scatter(
+                        #     max_strength_row["x"],
+                        #     max_strength_row["y"],
+                        #     marker="x",
+                        #     color="r",
+                        #     s=10,
+                        # )
 
                         # Calculate gradient of segment
                         dx = end_x - start_x
@@ -686,16 +752,26 @@ if __name__ == "__main__":
                             x_vals = [x0 - dx_line, x0 + dx_line]
                             y_vals = [perp_grad * (x - x0) + y0 for x in x_vals]
 
-                        ax.plot(x_vals, y_vals, "r--")
+                        orthogonal_lines.append((x0, y0, perp_grad))
+                        # ax.plot(x_vals, y_vals, "r--")
 
                 else:
-                    print(
-                        f"Segment skipped: no match for robot {robot_id} in cell {cell_id}, segment {i}"
-                    )
+                    print(f"Segment skipped: no match for robot {robot_id} in cell {cell_id}, segment {i}")
                     
-    ax.scatter(
-        SIGNAL_SOURCE_POS[0], SIGNAL_SOURCE_POS[1], marker="x", color="blue", s=50
-    )
+    # ax.scatter(
+    #     SIGNAL_SOURCE_POS[0], SIGNAL_SOURCE_POS[1], marker="x", color="blue", s=50
+    # )
+    
+    if len(orthogonal_lines) > 1:
+        intersection = intersection_point(orthogonal_lines)
+        
+        # ax.scatter(*intersection, color="black", marker="*", s=100, label="Intersection")
+        
+        print(point_error(intersection, SIGNAL_SOURCE_POS))
+        print(total_steps)
+    else:
+        print(f"{len(orthogonal_lines)} lines drawn. Cannot localize")
+        print(total_steps)
 
-    ax.axis("equal")
-    plt.show()
+    # ax.axis("equal")
+    # plt.show()
