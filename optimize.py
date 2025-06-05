@@ -3,34 +3,51 @@ from Patrol import OmniPatrol
 from shapely.ops import unary_union
 
 
-def generate_bounds(config, Sr, x_bound, y_bound):
+def generate_bounds(config, Sr, x_bound, y_bound, patrol="Omni"):
     bounds = []
     x_min, x_max = x_bound
     y_min, y_max = y_bound
+    
+    if patrol not in ["Omni", "Dir"]:
+        raise ValueError("Patrol type must be 'Omni' or 'Dir'.")
+    
     for shape, count in config.items():
         for _ in range(count):
             if shape == "Triangle":
-                length_max = (3 * Sr) / (2 * np.sqrt(3))
+
+                if patrol == "Omni":
+                    length_max = (3 * Sr) / (2 * np.sqrt(3))
+                elif patrol == "Dir":
+                    length_max = (np.sqrt(3) * Sr) / 2
+
             elif shape == "Square":
-                length_max = 2 * Sr
+
+                if patrol == "Omni":
+                    length_max = 2 * Sr
+                elif patrol == "Dir":
+                    length_max = Sr / np.sqrt(2)
             else:
-                length_max = (2 * Sr) / np.sqrt(3)
+
+                if patrol == "Omni":
+                    length_max = (2 * Sr) / np.sqrt(3)
+                elif patrol == "Dir":
+                    length_max = Sr / 2
+
             bounds.extend(
                 [
                     (x_min, x_max),
                     (y_min, y_max),
                     (0, 360),
-                    (1.0, length_max),
+                    (3.0, length_max),
                 ]
             )
     return bounds
 
 
 # Generalized objective function
-def generalized_objective(params, S_R, weights, config, map_boundary):
+def generalized_objective(params, S_R, weights, config, map_boundary, PatrolType):
 
     idx = 0
-    num_vertices = []
     coverage_shapes = []
     observation_shapes = []
     perimeter_total = 0
@@ -45,8 +62,7 @@ def generalized_objective(params, S_R, weights, config, map_boundary):
             angle = params[idx + 2]
             length = params[idx + 3]
 
-            patrol = OmniPatrol(shape, (x, y), S_R, side=length, angle=angle)
-            num_vertices.append(len(patrol.vertices))
+            patrol = PatrolType(shape, (x, y), S_R, side=length, angle=angle)
 
             coverage_shapes.append(patrol.coverage)
             observation_shapes.append(patrol.observations)
@@ -73,7 +89,7 @@ def generalized_objective(params, S_R, weights, config, map_boundary):
         #    This includes the wraparound gap from the last to the first agent.
         separations = np.diff(sorted_angles)
         wraparound_separation = total_angle_range - sorted_angles[-1] + sorted_angles[0]
-        
+
         all_separations = np.append(separations, wraparound_separation)
 
         # 3. Calculate the total deviation from the ideal separation.

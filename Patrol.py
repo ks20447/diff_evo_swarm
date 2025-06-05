@@ -1,10 +1,12 @@
 import math
 import numpy as np
-from shapely import difference
 from matplotlib.path import Path
+from shapely import unary_union
+from shapely.affinity import scale
 from shapely.geometry import Polygon
 from matplotlib.patches import PathPatch
 from shapely.affinity import rotate, translate
+from shapely import difference, union_all, intersection
 
 
 def rotate_point(point, angle_deg):
@@ -82,13 +84,12 @@ class OmniPatrol:
         else:
             self.side = side
 
-
         self.vertices, self.perimeter = get_vertices_from_shape_name(
             self.shape, self.side
         )
         if self.vertices.size == 0:
             raise ValueError("Invalid shape type")
-        
+
         self.angle = angle % (360 / len(self.vertices))
 
         self.patrol = self.create_patrol_polygon()
@@ -213,17 +214,28 @@ class OmniPatrol:
 
 class DirPatrol:
 
-    def __init__(self, shape, centroid, s_r, side, angle=0, clock=True):
+    def __init__(self, shape, centroid, s_r, side="max", angle=0, clock=True):
 
         self.shape = shape.capitalize()
         self.centroid = centroid
         self.s_r = s_r
-        self.side = side
         self.angle = angle
         self.clock = clock
+        self.side_bounds = self.generate_bounds_from_shape()
+
+        if type(side) == str:
+            if side.capitalize() == "Min":
+                self.side = self.side_bounds[0]
+            elif side.capitalize() == "Max":
+                self.side = self.side_bounds[1]
+            else:
+                raise ValueError("Invalid Side Value")
+        else:
+            self.side = side
 
         self.vertices, self.perimeter = get_vertices_from_shape_name(
-            self.shape, self.side, clock=self.clock,
+            self.shape,
+            self.side,
         )
         if self.vertices.size == 0:
             raise ValueError("Invalid shape type")
@@ -231,7 +243,16 @@ class DirPatrol:
         self.offset = self.get_offset_from_shape_name()
         self.patrol = self.create_patrol_polygon()
         self.coverages = self.create_coverage_polygons()
-        self.sweeping = self.create_sweeping_polygons()
+        self.sweeps = self.create_sweeping_polygons()
+        
+        self.patrol = self.transform_polygon(self.patrol)
+        self.coverages = [self.transform_polygon(coverage) for coverage in self.coverages.values()]
+        self.sweeps = [self.transform_polygon(sweep) for sweep in self.sweeps.values()]
+
+        self.coverage = self.union_of_intersections()
+        self.outline = self.create_outline_polygon()
+        self.observations = self.outline
+
 
     def get_offset_from_shape_name(self):
 
@@ -243,6 +264,7 @@ class DirPatrol:
 
         return shape_offsets.get(self.shape, 0)
 
+
     def get_angle_to_vertex(self, point_start, point_end):
 
         x1, y1 = point_start
@@ -250,9 +272,33 @@ class DirPatrol:
 
         return math.atan2(y2 - y1, x2 - x1)
 
+
     def create_patrol_polygon(self):
 
         return Polygon(self.vertices)
+
+
+    def transform_polygon(self, polygon):
+
+        polygon = rotate(polygon, self.angle, origin=(0, 0))
+        polygon = translate(polygon, self.centroid[0], self.centroid[1])
+        
+        if not self.clock:
+            
+            polygon = scale(polygon, xfact=-1, yfact=1, origin=self.centroid)
+
+        return polygon
+
+
+    def generate_bounds_from_shape(self):
+        lower = 1.0
+        upper_bounds = {
+            "Triangle": (np.sqrt(3) * self.s_r) / 2,
+            "Square": self.s_r / np.sqrt(2),
+            "Hexagon": self.s_r / 2,
+        }
+        return [lower, upper_bounds.get(self.shape, lower)]
+
 
     def create_coverage_polygons(self):
 
@@ -287,8 +333,9 @@ class DirPatrol:
 
         return coverages
 
+
     def create_sweeping_polygons(self):
-        
+
         sweeps = {}
         num_edges = len(self.vertices)
 
@@ -297,11 +344,16 @@ class DirPatrol:
             end = self.vertices[(ind + 1) % num_edges]
 
             for suffix, offset in zip(("a", "b"), (-self.offset, self.offset)):
-                angle_start = (self.get_angle_to_vertex(start, vertex) + offset) % (2 * np.pi)
-                angle_end = (self.get_angle_to_vertex(vertex, end) + offset) % (2 * np.pi)
+                angle_start = (self.get_angle_to_vertex(start, vertex) + offset) % (
+                    2 * np.pi
+                )
+                angle_end = (self.get_angle_to_vertex(vertex, end) + offset) % (
+                    2 * np.pi
+                )
 
                 if angle_start <= angle_end:
                     angle_start += 2 * np.pi
+                angles = np.linspace(angle_start, angle_end, 30)[::-1]
 
                 angles = np.linspace(angle_start, angle_end, 30)
                 arc = [
@@ -312,4 +364,39 @@ class DirPatrol:
                 sweeps[f"sweeps_{ind}_{suffix}"] = Polygon([vertex] + arc + [vertex])
 
         return sweeps
+    
+    
+    def union_of_intersections(self):
+        
+        coverages = self.coverages
+        sweeps = self.sweeps
+
+        intersections = [a.intersection(b) for a in coverages for b in sweeps if a.intersects(b)]
+        union_of_intersections = unary_union(intersections)
+        
+        return union_of_intersections
+    
+    
+    def create_outline_polygon(self):
+        
+        return unary_union(self.coverages + self.sweeps)
+
+
+    def plot(self, ax, coverage=True, outline=False):
+
+        patrol_x, patrol_y = self.patrol.exterior.xy
+                
+        if outline:
+            outline_x, outline_y = self.outline.exterior.xy
+            ax.fill(outline_x, outline_y, label="Sensing Coverage")
+            
+        if coverage:
+            for poly in self.coverage.geoms:
+                if type(poly) is Polygon:
+                    coverage_x, coverage_y = poly.exterior.xy
+                    ax.fill(coverage_x, coverage_y, label="Triangulation Coverage")
+
+        ax.plot(patrol_x, patrol_y, color="k", linestyle="--", label="Patrol Route")
+        
+        
 
