@@ -251,111 +251,52 @@ class Robot:
 
     def sense_signal(self, signal_source_pos, emitter_params):
 
-        def convert_to_dB(value):
-            # Handles both scalar and numpy array inputs for value
-            return 10 * np.log10(np.asarray(value) + EPSILON) # Added EPSILON to avoid log(0)
+            def convert_to_dB(value):
+                return 10 * np.log10(value)
 
-        def angle_to_point(agent_pos, agent_theta, target_pos):
-            dx = target_pos[0] - agent_pos[0]
-            dy = target_pos[1] - agent_pos[1]
-            target_angle = math.atan2(dy, dx)
-            angle_diff = (target_angle - agent_theta + math.pi) % (
-                2 * math.pi
-            ) - math.pi
-            return angle_diff
+            def angle_to_point(agent_pos, agent_theta, target_pos):
+                dx = target_pos[0] - agent_pos[0]
+                dy = target_pos[1] - agent_pos[1]
+                target_angle = math.atan2(dy, dx)
+                angle_diff = (target_angle - agent_theta + math.pi) % (
+                    2 * math.pi
+                ) - math.pi
+                return angle_diff
 
-        efficiency = emitter_params["efficiency"]
-        pt = emitter_params["pt"]
-        gain_t = emitter_params["gain"] # Assuming this is a scalar gain for the transmitter
-        wavelength = emitter_params["wavelength"]
+            efficiency = emitter_params["efficiency"]
+            pt = emitter_params["pt"]
+            gain_t = emitter_params["gain"]
+            wavelength = emitter_params["wavelength"]
 
-        distance = np.linalg.norm(self.position - signal_source_pos)
-        if distance < EPSILON: # Avoid division by zero if at the source
-            distance = EPSILON
+            distance = np.linalg.norm(self.position - signal_source_pos)
 
-        if self.sense_type == "Omni":
-            # For Omni, gain_array is a scalar, los is a scalar
-            gain_array_val = 1.0 
-            los_val = angle_to_point(self.position, self.orientation, signal_source_pos)
-            # Ensure radiation calculation results in scalar for Omni
-            radiation = 1.0 # Omni is always 1.0, no sinc pattern
-        elif self.sense_type == "Dir":
-            # For Dir, gain_array is an array, los is a list (becomes array in calculation)
-            gain_array_val = np.array([4.0, 4.0]) # Example directional gain
-            los_val = np.array([angle_to_point(self.position, self.orientation + offset, signal_source_pos) for offset in self.offsets])
-            # Radiation calculation for directional antenna
-            # Ensure sinc argument is not zero, add EPSILON if necessary, though pi in denominator helps
-            sinc_arg = (gain_array_val * los_val) / (np.pi + EPSILON)
-            radiation = gain_array_val * (np.sinc(sinc_arg) ** 2)
-        else:
-            raise ValueError(f"Unknown sense_type: {self.sense_type}")
-            
-        noise = 0 # np.random.normal(0, 0.1) # Example noise, can be array if radiation is array
+            if self.sense_type == "Omni":
+                gain_array = np.array(1.0)
+                los = angle_to_point(self.position, self.orientation, signal_source_pos)
+            elif self.sense_type == "Dir":
+                gain_array = np.array([4.0, 4.0]) 
+                los = [angle_to_point(self.position, self.orientation + offset, signal_source_pos) for offset in self.offsets]
+                
+            # noise = np.random.normal(0, 3, size=distances.shape)
+            noise = 0
 
-        # Free Space Path Loss (FSPL) in dB
-        fspl_db = convert_to_dB((wavelength / (4 * np.pi * distance))**2) # FSPL formula P_r/P_t = G_t*G_r*(lambda/(4*pi*d))^2
+            radiation = np.where(
+                gain_array == 1.0,
+                1.0,
+                gain_array * (np.sinc(((gain_array * los) / np.pi)) ** 2),
+            )
 
-        # Received power in dBm or dB
-        # Pr = Pt_dB + Gt_dB + Gr_dB - FSPL_dB (incorrect formula structure previously)
-        # Pr_watts = Pt_watts * Gt * Gr * (lambda / (4*pi*d))^2
-        # Pr_dB = Pt_dB + Gt_dB + Gr_dB + 20*log10(lambda / (4*pi*d))
-        # Or Pr_dB = Pt_dB + Gt_dB + Gr_dB + 20*log10(lambda) - 20*log10(4*pi*d)
+            pr = (
+                efficiency * pt
+                + convert_to_dB(gain_t)
+                + convert_to_dB(radiation)
+                + convert_to_dB(wavelength / (4 * np.pi * distance + EPSILON)) # EPSILON is used here
+                + noise
+            )
 
-        # Assuming emitter_params["pt"] is in dB (e.g., dBm)
-        # Assuming emitter_params["gain"] is transmitter gain in dBi
-        # 'radiation' here acts as the relative receiver gain pattern (Gr)
-        
-        pr = (
-            pt  # Transmitted power (e.g., in dBm)
-            + gain_t # Transmitter gain (e.g., in dBi)
-            + convert_to_dB(radiation) # Receiver gain pattern (now in dB)
-            + fspl_db # Path loss (already in dB and typically negative)
-            + noise # Noise in dB
-        )
-        # No, efficiency should be applied to linear values or handled in dB appropriately.
-        # If efficiency is a factor (0-1), apply it before dB conversion or subtract -10*log10(efficiency_factor)
-        # For now, assuming pt, gain_t are in dB, radiation becomes dB.
-        # The previous formula for pr was adding dB values somewhat inconsistently.
-        # A more standard link budget: Pr_dB = Pt_dB + Gt_dB + Gr_dB - L_path_dB - L_other_dB
-        # Where Gr_dB here is convert_to_dB(radiation)
-        # And L_path_dB is -fspl_db if fspl_db is defined as 20log10(lambda/(4pid))
-        # Let's re-evaluate based on common FSPL application.
-        # FSPL_dB = 20*log10(d) + 20*log10(f) + 20*log10(4pi/c) - Gt - Gr  (if f is freq)
-        # Or simpler: L_fspl = -20*log10(lambda / (4*pi*d)) = 20*log10(4*pi*d/lambda)
+            self.sensed_signal_strength = pr
 
-        # Corrected Received Power Calculation (simplified, assuming pt and gain_t are in dB)
-        # Let Pr_linear = Pt_linear * Gt_linear * Gr_linear * (lambda / (4 * pi * d))^2 * efficiency
-        # So Pr_dB = Pt_dB + Gt_dB + Gr_dB + 20*log10(lambda / (4*pi*d)) + 10*log10(efficiency) + Noise_dB
-
-        pt_linear = 10**(pt/10) # Convert Pt from dB to linear
-        gain_t_linear = 10**(gain_t/10) # Convert Gt from dB to linear
-        
-        # radiation is already gain_r_linear_pattern
-        # distance factor squared for power
-        path_loss_linear_factor = (wavelength / (4 * np.pi * distance + EPSILON))**2
-
-        pr_linear = efficiency * pt_linear * gain_t_linear * radiation * path_loss_linear_factor
-        
-        # Convert final received power to dB, then add noise in dB
-        self.sensed_signal_strength = convert_to_dB(pr_linear) + noise
-        
-        # If you want to keep the original structure with adding dB values:
-        # Be careful with convert_to_dB(radiation) if radiation can be 0. Added EPSILON in convert_to_dB.
-        # Original-like structure attempt (ensure all terms are compatible):
-        # log_lambda_factor = convert_to_dB(wavelength / (4 * np.pi * distance + EPSILON)) # This is 10log10, for power should be 20log10 if lambda factor is not squared.
-        # path_gain_db = 2 * 10 * np.log10(wavelength / (4 * np.pi * distance + EPSILON)) # 20log10(lambda / (4pid))
-        
-        # pr_final_attempt_db = (
-        #     pt # Pt in dB
-        #     + gain_t # Gt in dB
-        #     + convert_to_dB(radiation) # Gr pattern in dB
-        #     + path_gain_db # Path gain in dB (includes lambda, d)
-        #     + 10 * np.log10(efficiency + EPSILON) # Efficiency in dB
-        #     + noise # Noise in dB
-        # )
-        # self.sensed_signal_strength = pr_final_attempt_db
-
-        return self.sensed_signal_strength
+            return pr
     
     def update_patrol(self, new_waypoints):
             """

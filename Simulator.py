@@ -280,7 +280,7 @@ class Simulator:
 
                     signal_for_color = self.min_cmap # Default color value
                     if isinstance(sig_curr_raw, np.ndarray) and sig_curr_raw.size > 0:
-                        signal_for_color = sig_curr_raw[1] # Use first element for coloring
+                        signal_for_color = sig_curr_raw[0] # Use first element for coloring
                     elif isinstance(sig_curr_raw, (float, int, np.number)): # Check for scalar numeric types
                         signal_for_color = sig_curr_raw
                     
