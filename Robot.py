@@ -58,6 +58,7 @@ class Robot:
         self.orientation = 0.0  # Radians, 0 is along positive X-axis
         self.is_rotating = False
         self.departure_orientation = 0.0  # Target orientation after rotation
+        self.initial_orientation = 0.0
 
         self.initial_patrol_waypoint_pos = (
             self.waypoints[0].copy()
@@ -85,6 +86,7 @@ class Robot:
                     self.orientation = math.atan2(
                         direction_vector[1], direction_vector[0]
                     )
+        self.initial_orientation = self.normalize_angle(self.orientation)
         self.departure_orientation = self.normalize_angle(self.orientation)
 
         self.sense_type = sense_type
@@ -108,7 +110,7 @@ class Robot:
             if isinstance(self.sensed_signal_strength, np.ndarray)
             else self.sensed_signal_strength
         )
-        self.path_history = [(self.position.copy(), initial_signal_to_store)]
+        self.path_history = [(self.position.copy(), self.orientation, initial_signal_to_store)]
 
     def normalize_angle(self, angle):
         """Normalize an angle to the range [-pi, pi]."""
@@ -130,12 +132,7 @@ class Robot:
         and patrol completion logic. Appends current state to path_history.
         """
         if self.patrol_cycle_completed or not self.waypoints.size:
-            if (
-                not self.path_history
-                or not np.array_equal(self.path_history[-1][0], self.position)
-                or not self._signals_equal(self.path_history[-1][1], self.sensed_signal_strength) # Use helper
-            ):
-                self._append_to_path_history()
+            self._append_to_path_history()
             return
 
         current_wp_is_initial = np.array_equal(
@@ -150,8 +147,13 @@ class Robot:
             if abs(angle_difference) < ORIENTATION_ALIGNMENT_THRESHOLD_RAD:
                 self.orientation = self.normalize_angle(self.departure_orientation)
                 self.is_rotating = False
-                if current_wp_is_initial and not self.has_left_initial_waypoint:
-                    self.has_left_initial_waypoint = True
+
+                # If we’re rotating at the final waypoint, check if we can now finish
+                if current_wp_is_initial and self.has_left_initial_waypoint:
+                    self.patrol_cycle_completed = True
+                    self._append_to_path_history()
+                    return
+
                 self.current_waypoint_index = (self.current_waypoint_index + 1) % len(
                     self.waypoints
                 )
@@ -164,20 +166,29 @@ class Robot:
                     self.orientation = self.normalize_angle(
                         self.orientation + rotation_step
                     )
-        else: 
+        else:
             target_waypoint = self.waypoints[self.current_waypoint_index]
             direction_vector = target_waypoint - self.position
             distance_to_waypoint = np.linalg.norm(direction_vector)
 
             if distance_to_waypoint < WAYPOINT_REACH_THRESHOLD:
                 self.position = target_waypoint.copy()
+
                 if (
                     np.array_equal(target_waypoint, self.initial_patrol_waypoint_pos)
                     and self.has_left_initial_waypoint
                 ):
-                    self.patrol_cycle_completed = True
-                    self._append_to_path_history() 
-                    return 
+                    # At start, check if aligned; if not, trigger rotation
+                    angle_to_start = self.normalize_angle(self.orientation - self.initial_orientation)
+                    if abs(angle_to_start) < ORIENTATION_ALIGNMENT_THRESHOLD_RAD:
+                        self.patrol_cycle_completed = True
+                        self._append_to_path_history()
+                        return
+                    else:
+                        self.departure_orientation = self.normalize_angle(self.initial_orientation)
+                        self.is_rotating = True
+                        self._append_to_path_history() # Log state before returning
+                        return
 
                 next_wp_idx = (self.current_waypoint_index + 1) % len(self.waypoints)
                 next_target_wp = self.waypoints[next_wp_idx]
@@ -187,11 +198,11 @@ class Robot:
                     or len(self.waypoints) < 2
                 ):
                     self.departure_orientation = self.normalize_angle(self.orientation)
-                    self.is_rotating = False 
+                    self.is_rotating = False
                     if current_wp_is_initial and not self.has_left_initial_waypoint:
                         self.has_left_initial_waypoint = True
                     self.current_waypoint_index = next_wp_idx
-                else: 
+                else:
                     direction_to_next_target = next_target_wp - self.position
                     self.departure_orientation = self.normalize_angle(
                         math.atan2(
@@ -202,20 +213,15 @@ class Robot:
                     angle_diff_to_departure = self.normalize_angle(
                         self.departure_orientation - current_orientation_normalized
                     )
-                    if (
-                        abs(angle_diff_to_departure)
-                        > ORIENTATION_ALIGNMENT_THRESHOLD_RAD
-                    ):
+                    if abs(angle_diff_to_departure) > ORIENTATION_ALIGNMENT_THRESHOLD_RAD:
                         self.is_rotating = True
-                    else: 
+                    else:
                         self.orientation = self.departure_orientation
                         self.is_rotating = False
                         if current_wp_is_initial and not self.has_left_initial_waypoint:
                             self.has_left_initial_waypoint = True
                         self.current_waypoint_index = next_wp_idx
-            elif (
-                distance_to_waypoint > EPSILON
-            ): 
+            elif distance_to_waypoint > EPSILON:
                 self.orientation = self.normalize_angle(
                     math.atan2(direction_vector[1], direction_vector[0])
                 )
@@ -223,7 +229,9 @@ class Robot:
                 self.position += move_vector
                 if not self.has_left_initial_waypoint and not current_wp_is_initial:
                     self.has_left_initial_waypoint = True
+
         self._append_to_path_history()
+
 
     def _append_to_path_history(self):
         """Helper method to append current state to path_history and manage its length."""
@@ -234,20 +242,16 @@ class Robot:
             else self.sensed_signal_strength
         )
 
+        # The conditional check has been removed to log data at every time step.
+        self.path_history.append(
+            (self.position.copy(), self.orientation, current_signal_to_store)
+        )
+        
         if (
-            not self.path_history
-            or not np.array_equal(self.path_history[-1][0], self.position)
-            # Use the helper method for comparing signal strengths
-            or not self._signals_equal(self.path_history[-1][1], self.sensed_signal_strength)
+            self.max_path_history > 0
+            and len(self.path_history) > self.max_path_history
         ):
-            self.path_history.append(
-                (self.position.copy(), current_signal_to_store)
-            )
-            if (
-                self.max_path_history > 0
-                and len(self.path_history) > self.max_path_history
-            ):
-                self.path_history.pop(0)
+            self.path_history.pop(0)
 
     def sense_signal(self, signal_source_pos, emitter_params):
 
